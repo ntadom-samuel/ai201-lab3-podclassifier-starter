@@ -55,7 +55,46 @@ def build_few_shot_prompt(labeled_examples: list[dict], description: str) -> str
 
     Before writing code, complete specs/classifier-spec.md.
     """
-    return ""
+    instruction = (
+        "You are classifying podcast episodes by their format. Classify the "
+        "episode into exactly one of these four labels:\n\n"
+        "- interview: a conversation between a host and one or more guests\n"
+        "- solo: a single host speaking from memory, experience, or opinion — "
+        "no guests, no assembled external sources\n"
+        "- panel: multiple guests with roughly equal speaking time, often "
+        "debating or discussing a topic together\n"
+        "- narrative: a story assembled from external sources — interviews, "
+        "archival audio, reporting — with a clear narrative arc"
+    )
+
+    parts = [instruction]
+
+    # Few-shot examples. When labeled_examples is empty this section is omitted
+    # entirely (no dangling header or "---" delimiter) and the prompt degrades
+    # gracefully to zero-shot — the label definitions above carry the task.
+    if labeled_examples:
+        example_blocks = [
+            f"Title: {ex['title']}\n"
+            f"Description: {ex['description']}\n"
+            f"Label: {ex['label']}"
+            for ex in labeled_examples
+        ]
+        parts.append("Examples:\n\n" + "\n\n---\n\n".join(example_blocks))
+
+    # The episode to classify, in the same shape as the examples but with the
+    # label left open. A very short or empty description is passed through as-is
+    # — formatting is this function's only job.
+    parts.append(
+        "Classify the episode below.\n\n"
+        f"Description: {description}\n\n"
+        "Respond with the label on its own line (exactly one of: "
+        "interview, solo, panel, narrative), then a brief reasoning on the "
+        "following lines. For example:\n\n"
+        "interview\n"
+        "Reasoning: <one or two sentences>"
+    )
+
+    return "\n\n".join(parts)
 
 
 def classify_episode(description: str, labeled_examples: list[dict]) -> dict:
@@ -76,7 +115,38 @@ def classify_episode(description: str, labeled_examples: list[dict]) -> dict:
 
     Before writing code, complete specs/classifier-spec.md.
     """
-    return {
-        "label": None,
-        "reasoning": "Classifier not yet implemented. Complete Milestone 2.",
-    }
+    # Step 5 — never raise; the 20-call evaluation loop depends on always
+    # getting a dict back, so any failure resolves to an "unknown" result.
+    try:
+        # Step 1 — build the prompt.
+        prompt = build_few_shot_prompt(labeled_examples, description)
+
+        # Step 2 — send to the LLM.
+        response = _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+        )
+        text = response.choices[0].message.content or ""
+
+        # Step 3 — parse. First non-empty line is the label; the rest is the
+        # free-text reasoning (the format requested in build_few_shot_prompt).
+        lines = [line for line in text.strip().splitlines() if line.strip()]
+        if not lines:
+            return {"label": "unknown", "reasoning": "empty response from model"}
+
+        label = lines[0].strip().lower().strip(".:")
+        reasoning = "\n".join(lines[1:]).strip()
+        reasoning = reasoning.removeprefix("Reasoning:").strip()
+
+        # Step 4 — validate against the allowed set; anything else is "unknown".
+        if label not in VALID_LABELS:
+            return {
+                "label": "unknown",
+                "reasoning": reasoning or f"unrecognized label: {lines[0].strip()!r}",
+            }
+
+        return {"label": label, "reasoning": reasoning}
+
+    except Exception as e:
+        return {"label": "unknown", "reasoning": f"error: {e}"}

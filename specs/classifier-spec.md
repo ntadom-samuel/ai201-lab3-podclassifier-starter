@@ -11,21 +11,22 @@ your answers here become the blueprint for `build_few_shot_prompt()` and
 ## build_few_shot_prompt(labeled_examples, description)
 
 ### What it does
+
 Constructs a prompt string for the LLM that includes the task instructions,
 all labeled training examples, and the new episode description to classify.
 
 ### Inputs
 
-| Parameter | Type | Description |
-|---|---|---|
+| Parameter          | Type         | Description                                                                                                          |
+| ------------------ | ------------ | -------------------------------------------------------------------------------------------------------------------- |
 | `labeled_examples` | `list[dict]` | Each dict has `"title"`, `"description"`, `"label"` (and others). These are the examples you labeled in Milestone 1. |
-| `description` | `str` | The episode description to classify. |
+| `description`      | `str`        | The episode description to classify.                                                                                 |
 
 ### Output
 
-| Return value | Type | Description |
-|---|---|---|
-| prompt | `str` | A complete prompt string ready to send to the LLM. |
+| Return value | Type  | Description                                        |
+| ------------ | ----- | -------------------------------------------------- |
+| prompt       | `str` | A complete prompt string ready to send to the LLM. |
 
 ---
 
@@ -91,10 +92,13 @@ the format below:" followed by the output format you chose.
 **What output format should you request from the LLM?**
 
 ```
-[blank — you need to parse the response in classify_episode(). What format
-makes parsing reliable? Think about: a single label on its own line?
-A structured format like "Label: X / Reasoning: Y"? JSON?
-What are the tradeoffs?]
+Label and reasoning on separate lines. E.g.
+
+"
+interview
+Reasoning: clear host-guest Q&A with a single guest...
+
+"
 ```
 
 ---
@@ -102,8 +106,16 @@ What are the tradeoffs?]
 **Edge cases to handle in the prompt:**
 
 ```
-[blank — what if labeled_examples is empty? What if the description is very
-short? How does your prompt handle these?]
+labeled_examples empty: build a valid zero-shot prompt — keep the task
+instruction and label definitions, and conditionally omit the examples
+section entirely (no dangling header or stray "---" delimiters). The label
+definitions alone are enough for the model to classify.
+
+description short/empty: still build a valid prompt; place whatever text
+exists on the Description line (blank if empty). Don't try to judge
+sufficiency here — formatting is this function's only job. If the resulting
+classification is unreliable, classify_episode()'s validation + "unknown"
+fallback (Step 4) is the safety net.
 ```
 
 ---
@@ -111,21 +123,22 @@ short? How does your prompt handle these?]
 ## classify_episode(description, labeled_examples)
 
 ### What it does
+
 Classifies a single podcast episode description using the few-shot LLM classifier.
 Returns a dict with a label and reasoning.
 
 ### Inputs
 
-| Parameter | Type | Description |
-|---|---|---|
-| `description` | `str` | The episode description to classify. |
+| Parameter          | Type         | Description                                               |
+| ------------------ | ------------ | --------------------------------------------------------- |
+| `description`      | `str`        | The episode description to classify.                      |
 | `labeled_examples` | `list[dict]` | Labeled training examples from `load_labeled_examples()`. |
 
 ### Output
 
-| Return value | Type | Description |
-|---|---|---|
-| result | `dict` | Must have keys `"label"` and `"reasoning"`. `"label"` must be one of `VALID_LABELS` or `"unknown"`. |
+| Return value | Type   | Description                                                                                         |
+| ------------ | ------ | --------------------------------------------------------------------------------------------------- |
+| result       | `dict` | Must have keys `"label"` and `"reasoning"`. `"label"` must be one of `VALID_LABELS` or `"unknown"`. |
 
 ---
 
@@ -159,9 +172,16 @@ Extract the response text from:
 **Step 3 — Parse the response:**
 
 ```
-[blank — how do you extract the label and reasoning from the LLM's text output?
-What string operations or parsing logic do you need?
-This depends on the output format you chose in build_few_shot_prompt.]
+Strip the response, split into lines (text.strip().splitlines()).
+- label  = lines[0].strip().lower()   (first non-empty line)
+- reasoning = "\n".join(lines[1:]).strip(), with an optional
+  .removeprefix("Reasoning:").strip()
+
+Normalize label to lowercase so it matches VALID_LABELS. If the response is
+empty or has no parseable first line, fall through to the "unknown" path
+(Step 4). Keep parsing of the reasoning loose — first line is the contract,
+the rest is free text.
+
 ```
 
 ---
@@ -169,8 +189,20 @@ This depends on the output format you chose in build_few_shot_prompt.]
 **Step 4 — Validate the label:**
 
 ```
-[blank — what do you do if the LLM returns a label that isn't in VALID_LABELS?
-What should label be set to?]
+After parsing, check: if label not in VALID_LABELS, set label = "unknown".
+Keep the parsed reasoning regardless, so unknown results stay debuggable.
+
+Don't guess a "closest" label or default to a common one — that hides model
+failures and corrupts the accuracy evaluation. "unknown" is an honest
+signal, distinct from a confident wrong answer.
+
+Assumes Step 3 already normalized the label (strip, lower, drop trailing
+punctuation); then a plain membership check is safe.
+```
+
+```python
+if label not in VALID_LABELS:
+    label = "unknown"
 ```
 
 ---
@@ -178,9 +210,28 @@ What should label be set to?]
 **Step 5 — Handle errors gracefully:**
 
 ```
-[blank — what could go wrong? (Network error? Unparseable response?)
-What should the function return if something fails?
-Hint: the evaluation loop runs 20 calls — one bad response shouldn't crash everything.]
+Wrap the API call and parsing in try/except. classify_episode() must never
+raise — the 20-call evaluation loop depends on each call returning a dict.
+
+What can fail: network/API errors (timeout, rate limit, auth, 5xx);
+empty or None message.content; a response that ignores the format. The
+last case already resolves to "unknown" via Step 4.
+
+On any exception, return {"label": "unknown", "reasoning": f"error: {e}"} —
+same shape as success. Catch broadly here on purpose: the contract is
+"always return a valid dict," and putting str(e) in reasoning keeps failures
+debuggable. "unknown" is the single bucket for both invalid labels and hard
+errors, so one bad call never crashes the rest.
+```
+
+```python
+try:
+    response = _client.chat.completions.create(...)
+    text = response.choices[0].message.content
+    # ... Step 3 parse, Step 4 validate ...
+    return {"label": label, "reasoning": reasoning}
+except Exception as e:
+    return {"label": "unknown", "reasoning": f"error: {e}"}
 ```
 
 ---
@@ -208,7 +259,7 @@ any labels you're unsure about. Annotation quality is part of the lab.
 
 ## Implementation Notes
 
-*Fill this in after implementing and testing both functions.*
+_Fill this in after implementing and testing both functions._
 
 **Test: what does the raw LLM response look like for one episode?**
 
